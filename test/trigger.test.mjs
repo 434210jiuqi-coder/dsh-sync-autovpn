@@ -13,7 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { GIT_NET_CMD_RE, SyncTrigger, portOf } from '../lib/trigger.js'
+import { GIT_NET_CMD_RE, SyncTrigger, liveTriggers, portOf } from '../lib/trigger.js'
 
 let failures = 0
 function check(name, cond, extra = null) {
@@ -132,6 +132,7 @@ check(
 check('模块路径就是那个假引擎', c2.patch.modulePath === fs.realpathSync(c2.file), c2.patch.modulePath)
 const c2again = await c2.trigger.patchChatsync()
 check('重复调用是幂等的', c2again.ok === true && c2again.methods.length === 3, c2again.methods)
+c2.trigger.dispose() // 用例之间必须清干净：活实例是共享的（模块级），留着会干扰后面所有用例
 
 /* ---------------------------------------------------------------- 3. 开 → 关 */
 
@@ -329,6 +330,40 @@ check('别人改过的键不去覆盖', process.env.HTTPS_PROXY === 'http://127.
 check('没有人碰过的键照常还原', !Object.prototype.hasOwnProperty.call(process.env, 'ALL_PROXY'), process.env.ALL_PROXY ?? null)
 delete process.env.HTTPS_PROXY
 c13.trigger.dispose()
+
+/* ---------------------------------------------------------------- 14. 多实例（宿主重跑 apply） */
+
+console.log('# 多实例：重载交接不让租约变孤儿')
+const c14 = await setup()
+const A = c14.trigger
+// 模拟宿主重跑 apply：同进程里又出现一份新实例（A 仍然活着）
+const B = new SyncTrigger({ config: { releaseIdleMinutes: 0, chatsyncPaths: [c14.file] } })
+B.provider = () => c14.provider
+const engine14 = new c14.mod.SyncEngine()
+const sync14 = engine14._syncOnce('reload-test') // 钩子应解析到「当前活着的那份」= B
+check('租约落在最新实例上（不是死抱创建时那份）', B.holds.size === 1 && A.holds.size === 0, { A: A.holds.size, B: B.holds.size })
+B.dispose() // 宿主卸载新实例
+check('卸载时把租约交接给仍活着的实例（不成孤儿）', A.holds.size === 1 && B.holds.size === 0, { A: A.holds.size, B: B.holds.size })
+await sync14
+await sleep(90)
+check('同步结束后照样按空闲关代理', c14.provider.disableCalls === 1, c14.provider.disableCalls)
+A.dispose()
+
+console.log('# 多实例：同一次工具调用只开一次代理')
+const c15 = await setup()
+const A15 = c15.trigger
+const B15 = new SyncTrigger({ config: { releaseIdleMinutes: 0, chatsyncPaths: [c15.file] } })
+B15.provider = () => c15.provider
+const call = { name: 'pwsh', callId: 'dup-1', arguments: { command: 'git push origin main' } }
+const h1 = await A15.armForShell(call)
+const h2 = await B15.armForShell(call)
+check('两份实例看到同一次调用只开一次代理', c15.provider.enableCalls === 1 && Boolean(h1) && h2 === null, { enables: c15.provider.enableCalls, h2 })
+check('归还交给任意一份实例都行', B15.releaseForShell({ callId: 'dup-1' }) === true)
+await sleep(90)
+check('归还后按空闲关代理', c15.provider.disableCalls === 1, c15.provider.disableCalls)
+A15.dispose()
+B15.dispose()
+check('卸载后没有残留的活实例', liveTriggers().length === 0, liveTriggers().length)
 
 /* ---------------------------------------------------------------- 收尾 */
 

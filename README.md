@@ -99,6 +99,7 @@ New-Item -ItemType Junction `
 | `injectProxyEnv` | `true` | 给 DSH 子进程注入 `HTTP(S)_PROXY`/`ALL_PROXY`。**已设好就不接管**，而且只还原自己写过的键（见下） |
 | `heartbeatSeconds` | `30` | 挂着同步期间多久碰一次「活动时间」，防止 dsh-clash-autovpn 的空闲关代理把同步掐了 |
 | `shellHoldTtlMs` | `1800000` | 命令行租约的兜底上限：pre-execute 开了租约、post-execute 没回来（工具被取消/宿主异常）时，超时自动释放——否则心跳会一直给代理续命，空闲关代理永远等不到 |
+| `syncHoldTtlMs` | `7200000` | 同步租约的兜底上限（正常路径用不到：`_syncOnce` 的 finally 一定归还），防同步引擎自身异常时代理被永久占住 |
 | `injectNotices` | `true` | 失败/异常时把提示注入下一轮上下文（正常情况不注入，避免噪声） |
 | `maxArmsPerHour` | `30` | 一小时最多自动开几次（防故障空转） |
 | `chatsyncPackage` | `@dpskk2/dsh-chatsync` | 包名（找 `lib/sync.js` 用） |
