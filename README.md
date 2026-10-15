@@ -14,12 +14,41 @@
 
 | 入口 | 挂在哪 | 覆盖的场景 |
 | --- | --- | --- |
-| `SyncEngine.prototype._syncOnce` | chatsync 的真实引擎原型（`lib/sync.js`） | 侧栏「⟳ 同步」按钮、设置页「立即同步」、自动同步定时器、启动拉取 —— 它们最终都调这一个方法 |
+| `SyncEngine.prototype._syncOnce` | chatsync 的真实引擎原型（`lib/sync.js`） | 侧栏「⟳ 同步」按钮、设置页「立即同步」、自动同步定时器、启动拉取、**话题结束自动同步** —— 它们最终都调这一个方法 |
 | `SyncEngine.prototype.applyProxyEnv` | 同上 | 把 chatsync 给 git 子进程的代理**对齐到 Clash 真实混合端口**（`dsh-sync.json` 里端口写错是同步失败的常见原因；只改内存副本，不动你的配置文件） |
 | `SyncEngine.prototype.flushSync` | 同上 | 退出冲刷是**同步**函数（`spawnSync`），来不及 await 开代理 —— 只能如实记一笔「这一轮可能没走代理」（本地提交仍在，下次同步会补上） |
 | `tools/pre-execute` 的 shell 命令 | 宿主工具钩子 | 命令行里的 `git push/pull/fetch/clone/ls-remote`、`gh …`：在命令**执行前**开代理，并把 `HTTP(S)_PROXY` 注入 DSH 子进程环境（git/gh/curl 靠它走代理） |
 
 挂钩子用的是**运行时原型包装**（`attach`），不是改 chatsync 的代码：chatsync 升级覆盖文件也不会被本插件改坏；代价是它如果改掉这三个方法名，钩子会挂不上——那时日志会明确写「没找到可装载的 chatsync lib/sync.js」或「三个候选方法都不存在」。
+
+---
+
+## 话题结束自动同步（聊完一个话题就同步一次）
+
+判据是**活动 + 空闲**，不是某个具体事件：`topicIdleSeconds`（默认 180 秒）内没有新的会话活动
+（`session/event` 与每次工具调用都算活动），就当作「这个话题聊完了」，自动跑一轮同步。也就是说
+——你连着聊、连着让我改代码，它不会插进来；**你停下来 3 分钟，它就替你把这一轮的成果同步出去**，
+而且走的是和「⟳ 同步」按钮完全相同的入口，所以照样经过上面那条「同步前先开代理」的链路。
+
+三道守卫 + 一层退避，防止它变成骚扰：
+
+| 守卫 | 行为 |
+| --- | --- |
+| 已有同步在跑 | 让路（等下一轮空闲），不排队堆叠 |
+| 最小间隔 `topicSyncMinIntervalSeconds`（默认 600s） | 距离上次同步（**任何**来源的同步都算）不足就顺延 |
+| chatsync 自己开着自动同步（`dsh-sync.json` 的 `mode=auto`） | 让位，不重复触发（两边同时推只会互相打架） |
+| 失败退避 | 连续失败时间隔翻倍（600 → 1200 → … 直到 `topicSyncMaxBackoffSeconds`，默认 2 小时），成功即清零 |
+
+结果与排期随时可查、也可手动踢一脚：
+
+```
+syncvpn_topic action=status    # 现在排在哪、上次结果、失败了几次、退避到什么时候
+syncvpn_topic action=now       # 立刻同步一轮（守卫照旧生效）
+```
+
+> 什么时候**不要**用它：如果你的机器上工作区镜像本身要跑几十分钟（见 README 末尾的
+> 「已知限制」），把 `topicSyncMinIntervalSeconds` 调大些，或者干脆用 chatsync 自带的
+> 周期自动同步（`mode=auto`）——两者会互相让位，但**别指望它们同时开还能更快**。
 
 ---
 
@@ -101,6 +130,15 @@ New-Item -ItemType Junction `
 | `shellHoldTtlMs` | `1800000` | 命令行租约的兜底上限：pre-execute 开了租约、post-execute 没回来（工具被取消/宿主异常）时，超时自动释放——否则心跳会一直给代理续命，空闲关代理永远等不到 |
 | `syncHoldTtlMs` | `7200000` | 同步租约的兜底上限（正常路径用不到：`_syncOnce` 的 finally 一定归还），防同步引擎自身异常时代理被永久占住 |
 | `injectNotices` | `true` | 失败/异常时把提示注入下一轮上下文（正常情况不注入，避免噪声） |
+| `autoSyncOnTopicEnd` | `true` | 话题结束自动同步总开关 |
+| `topicIdleSeconds` | `180` | 多久没有新活动算「话题结束」（秒） |
+| `topicSyncMinIntervalSeconds` | `600` | 两次话题同步之间的最小间隔（秒） |
+| `topicSyncMaxBackoffSeconds` | `7200` | 连续失败时的退避上限（秒） |
+| `topicSyncTrigger` | `auto` | 触发方式：`auto`（优先直接调引擎，否则走 HTTP）／`engine`／`route` |
+| `topicSyncBaseUrl` | `''` | 宿主 HTTP 接口地址；空 = 取环境变量 `DSH_WEB_URL` |
+| `topicSyncRoute` | `/dsh-sync/api/run` | 「立即同步」的接口路径 |
+| `topicSyncTimeoutMs` | `7200000` | 单次话题同步的等待上限（毫秒） |
+| `topicSyncYieldToChatsyncAuto` | `true` | chatsync 自己开着自动同步时让位 |
 | `maxArmsPerHour` | `30` | 一小时最多自动开几次（防故障空转） |
 | `chatsyncPackage` | `@dpskk2/dsh-chatsync` | 包名（找 `lib/sync.js` 用） |
 | `chatsyncPaths` | `[]` | 额外搜索路径（一般不用填；自动按 `DSH_PROFILE_DIR`、`~/.dsh/profiles/*`、`.pnpm` 布局找） |
@@ -126,6 +164,7 @@ New-Item -ItemType Junction `
 | `syncvpn_selftest()` | 自检：钩子 / 代理服务 / `dsh-sync.json` 端口 vs Clash 实际混合端口 / 端口有没有在听 / github.com:443 直连通不通 —— 只读，不改任何东西 |
 | `syncvpn_on(target?, reason?, region?)` | **手动**先开代理（你要自己 `git push`、或用户说「先开着」）。返回 `holdId` |
 | `syncvpn_off(reason?)` | 关代理并逐项还原（释放本插件持有的所有租约；等价于 `vpn_disable`） |
+| `syncvpn_topic(action?, includeLog?)` | 话题结束自动同步：`status` 看排期/上次结果/失败退避；`now` 立刻同步一轮 |
 
 ---
 

@@ -365,6 +365,95 @@ A15.dispose()
 B15.dispose()
 check('卸载后没有残留的活实例', liveTriggers().length === 0, liveTriggers().length)
 
+/* ---------------------------------------------------------------- 16. 话题结束自动同步 */
+
+console.log('# 话题结束自动同步：空闲到点才触发（走 HTTP 接口）')
+const c16 = await setup({ config: { topicIdleSeconds: 1, topicSyncMinIntervalSeconds: 0, injectNotices: false } })
+const httpCalls = []
+c16.trigger.fetchImpl = async (url, opts) => {
+  httpCalls.push({ url, method: opts?.method })
+  return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, summary: 'stub 同步完成' }) }
+}
+check('没有活动时不会触发', (await c16.trigger.runTopicSync('manual')).skipped === 'no-activity')
+c16.trigger.noteTopicActivity('session')
+check('活动之后排上了定时器（等空闲）', Boolean(c16.trigger.topicTimer))
+await sleep(1400)
+check('空闲到点自动触发了一次', httpCalls.length === 1, httpCalls)
+check('打的是 chatsync 的「立即同步」接口', /\/dsh-sync\/api\/run$/.test(httpCalls[0]?.url || '') && httpCalls[0]?.method === 'POST', httpCalls[0])
+check('触发前先开了代理（复用同一条链路）', c16.provider.enableCalls === 1, c16.provider.enableCalls)
+check('结果记下来了（含方式与摘要）', c16.trigger.topic.lastResult?.via === 'route' && /stub 同步完成/.test(String(c16.trigger.topic.lastResult?.summary || '')), c16.trigger.topic.lastResult)
+await sleep(90)
+check('同步结束后按空闲还租约关代理', c16.provider.disableCalls === 1, c16.provider.disableCalls)
+c16.trigger.dispose()
+
+console.log('# 话题结束自动同步：抓到引擎就直接调它（不走 HTTP）')
+const c17 = await setup({ config: { topicIdleSeconds: 60, topicSyncMinIntervalSeconds: 0, injectNotices: false } })
+const engineCalls = []
+c17.trigger.lastEngine = {
+  async syncOnce(reason, opts) {
+    engineCalls.push({ reason, opts })
+    return { ok: true, summary: 'engine 同步完成' }
+  },
+}
+c17.trigger.fetchImpl = async () => {
+  throw new Error('不该走 HTTP')
+}
+c17.trigger.noteTopicActivity('tool')
+const r17 = await c17.trigger.runTopicSync('manual')
+check('直接调引擎且带 forceCommit', engineCalls[0]?.reason === 'topic-end' && engineCalls[0]?.opts?.forceCommit === true, engineCalls)
+check('没走 HTTP 接口', r17?.via === 'engine', r17?.via)
+check('结果里记的是 engine 方式', c17.trigger.topic.lastResult?.via === 'engine')
+c17.trigger.dispose()
+
+console.log('# 话题结束自动同步：三道守卫')
+const c18 = await setup({ config: { topicIdleSeconds: 60, topicSyncMinIntervalSeconds: 600, injectNotices: false } })
+c18.trigger.fetchImpl = async () => ({ ok: true, status: 200, text: async () => '{"ok":true}' })
+c18.trigger.noteTopicActivity('session')
+c18.trigger.topic.lastAt = Date.now() // 假装刚刚同步过
+check('最小间隔内不重复同步', (await c18.trigger.runTopicSync('manual')).skipped === 'too-soon')
+c18.trigger.topic.lastAt = null
+await c18.trigger.acquire('busy', { kind: 'sync' })
+c18.trigger.topic.dirty = true
+check('已有同步在跑就让路', (await c18.trigger.runTopicSync('manual')).skipped === 'sync-running')
+c18.trigger.dispose()
+
+const c19 = await setup({ config: { topicIdleSeconds: 60, topicSyncMinIntervalSeconds: 0, injectNotices: false } })
+c19.trigger.fetchImpl = async () => ({ ok: true, status: 200, text: async () => '{"ok":true}' })
+const syncJsonPath = path.join(process.env.DSH_HOME, 'dsh-sync.json')
+fs.writeFileSync(syncJsonPath, JSON.stringify({ mode: 'auto', enabled: true, remote: 'https://github.com/x/y.git' }), 'utf8')
+c19.trigger.noteTopicActivity('session')
+check('chatsync 自己开着自动同步时让位', (await c19.trigger.runTopicSync('manual')).skipped === 'chatsync-auto')
+fs.rmSync(syncJsonPath, { force: true })
+c19.trigger.dispose()
+
+console.log('# 话题结束自动同步：别的同步完成也算"刚同步过"')
+const c20 = await setup({ config: { topicIdleSeconds: 60, topicSyncMinIntervalSeconds: 600, injectNotices: false } })
+c20.trigger.noteTopicActivity('session')
+check('先被标记为「有活动待同步」', c20.trigger.topic.dirty === true)
+const engine20 = new c20.mod.SyncEngine()
+await engine20._syncOnce('manual') // 手动同步一轮（走钩子）
+check('同步完成后脏标记清掉、最小间隔重新计时', c20.trigger.topic.dirty === false && Boolean(c20.trigger.topic.lastAt))
+c20.trigger.dispose()
+
+console.log('# 话题结束自动同步：失败退避')
+const c21 = await setup({ config: { topicIdleSeconds: 60, topicSyncMinIntervalSeconds: 600, injectNotices: false } })
+c21.trigger.fetchImpl = async () => ({ ok: true, status: 200, text: async () => '{"ok":true,"summary":"ok"}' })
+c21.trigger.noteTopicActivity('session')
+c21.trigger.topic.lastAt = Date.now()
+c21.trigger.topic.failStreak = 0
+const r0 = await c21.trigger.runTopicSync('manual')
+c21.trigger.topic.failStreak = 3 // 假装连续失败三次
+c21.trigger.topic.lastAt = Date.now()
+const r3 = await c21.trigger.runTopicSync('manual')
+check('退避：同样"刚同步过"，失败越多等得越久', r3.retryInMs > r0.retryInMs * 4, { r0: r0.retryInMs, r3: r3.retryInMs })
+check('退避有上限（不超过 topicSyncMaxBackoffSeconds）', r3.retryInMs <= 7200 * 1000 + 2000, r3.retryInMs)
+// 成功一次就把退避清零
+c21.trigger.topic.lastAt = null
+c21.trigger.topic.dirty = true
+await c21.trigger.runTopicSync('manual')
+check('成功后退避清零', c21.trigger.topic.failStreak === 0, c21.trigger.topic.failStreak)
+c21.trigger.dispose()
+
 /* ---------------------------------------------------------------- 收尾 */
 
 fs.rmSync(tmp, { recursive: true, force: true })

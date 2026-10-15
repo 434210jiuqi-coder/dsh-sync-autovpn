@@ -73,9 +73,12 @@ await mod.apply(mockCtx, {
 })
 
 const toolNames = registered.map((t) => t?.name).sort()
-const expected = ['syncvpn_off', 'syncvpn_on', 'syncvpn_selftest', 'syncvpn_status']
+const expected = ['syncvpn_off', 'syncvpn_on', 'syncvpn_selftest', 'syncvpn_status', 'syncvpn_topic']
 const okTools = JSON.stringify(toolNames) === JSON.stringify(expected)
-const okHooks = hooks.some((h) => h.event === 'tools/pre-execute') && hooks.some((h) => h.event === 'tools/post-execute')
+const okHooks =
+  hooks.some((h) => h.event === 'tools/pre-execute') &&
+  hooks.some((h) => h.event === 'tools/post-execute') &&
+  hooks.some((h) => h.event === 'session/event') // 话题结束自动同步的活动信号
 const okEffect = effects.length === 1
 
 const trigger = globalThis.__dshSyncAutovpn
