@@ -192,6 +192,26 @@ node dsh-sync-autovpn\test\plugin-load.mjs                      # 装载预检 +
 
 预期：同步开始前一行「已为「sync:web-button」开启代理：节点「…」」，同步结束 + 空闲 1 分钟后一行「已自动关闭代理」。
 
+**不想等一整轮同步就用这个「只跑主仓库」的 30 秒版**（工作区镜像动辄几十 MB、几分钟，验证钩子用不着它）：
+
+```powershell
+$api = 'http://127.0.0.1:19387/dsh-sync/api'
+# ① 记住原值，临时关掉工作区同步
+$cfg = (Invoke-WebRequest -UseBasicParsing -NoProxy "$api/config").Content | ConvertFrom-Json
+Invoke-WebRequest -UseBasicParsing -NoProxy -Method POST -ContentType 'application/json' `
+  -Body (@{ workspaceSync = $false } | ConvertTo-Json) -Uri "$api/config" | Out-Null
+# ② 用同一个入口跑一轮（等价于点「立即同步」）
+Invoke-WebRequest -UseBasicParsing -NoProxy -Method POST -Body '{}' -Uri "$api/run" | Out-Null
+# ③ 还原
+Invoke-WebRequest -UseBasicParsing -NoProxy -Method POST -ContentType 'application/json' `
+  -Body (@{ workspaceSync = $cfg.config.workspaceSync } | ConvertTo-Json) -Uri "$api/config" | Out-Null
+# ④ 看两行日志 + 确认代理自动关了
+Get-Content "$env:USERPROFILE\.dsh\sync-autovpn\sync-autovpn.log" -Tail 6
+Get-Content "$env:USERPROFILE\.dsh\clash-autovpn\autovpn.log" -Tail 4
+```
+
+> 注意：`-NoProxy` 不能省。本机系统代理常开，直连 `127.0.0.1` 若被送进 Clash 会得到 502（看着像 DSH 挂了，其实只是绕了一圈）。
+
 ④ 想在不点同步的情况下验证真机链路：`syncvpn_on(target="https://github.com/")` → 在 DSH 里跑一条 `git ls-remote https://github.com/git/git.git HEAD`（应当 2 秒内出结果，且 `$env:HTTPS_PROXY` 是本机代理）→ `syncvpn_off()`。**用完一定记得关**（`syncvpn_off` 会逐项还原，包括系统代理与 Clash 模式）。
 
 ---
