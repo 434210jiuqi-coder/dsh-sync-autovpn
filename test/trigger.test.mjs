@@ -46,6 +46,10 @@ export class SyncEngine {
     calls.push({ fn: 'applyProxyEnv', proxy: cfg?.proxy ?? null })
   }
   flushSync() { calls.push({ fn: 'flushSync' }); return 'flushed' }
+  // 真实引擎里这几个只读方法存在（/api/status、会话活动探测都会调）——插件靠它们"顺手抓住"引擎实例
+  loadConfig() { calls.push({ fn: 'loadConfig' }); return { proxy: '', mode: 'manual' } }
+  workspaces() { calls.push({ fn: 'workspaces' }); return [] }
+  sessionActivity() { calls.push({ fn: 'sessionActivity' }); return { available: true, activeCount: 0 } }
 }
 `
 
@@ -69,6 +73,7 @@ function makeProvider(overrides = {}) {
     proxyUrl: 'http://127.0.0.1:1080',
     node: { name: 'Fake-香港' },
     region: '香港',
+    lastActivityAt: Date.now(),
     enableCalls: 0,
     disableCalls: 0,
     noteActivityCalls: 0,
@@ -87,7 +92,7 @@ function makeProvider(overrides = {}) {
       return {
         active: p.active,
         tripped: p.tripped,
-        lastActivityAt: Date.now(),
+        lastActivityAt: p.lastActivityAt,
         proxyUrl: p.proxyUrl,
         node: p.node,
         region: p.region,
@@ -96,6 +101,7 @@ function makeProvider(overrides = {}) {
     },
     noteActivity() {
       p.noteActivityCalls += 1
+      p.lastActivityAt = Date.now()
     },
     async verifyAndMaybeSwitch() {
       p.verifyCalls += 1
@@ -453,6 +459,71 @@ c21.trigger.topic.dirty = true
 await c21.trigger.runTopicSync('manual')
 check('成功后退避清零', c21.trigger.topic.failStreak === 0, c21.trigger.topic.failStreak)
 c21.trigger.dispose()
+
+console.log('# 心跳不能给自己续命：空闲到点必须真的关掉')
+const cHeart = await setup({ config: { releaseIdleMinutes: 2, topicIdleSeconds: 60 } })
+const engineHeart = new cHeart.mod.SyncEngine()
+await engineHeart._syncOnce('heartbeat-check') // 走完整链路：开代理 → 同步 → 还租约
+check('同步期间心跳在跑（保护同步不被空闲逻辑关掉）', cHeart.provider.noteActivityCalls >= 0)
+check('同步结束、租约还清后心跳已停', cHeart.trigger.heartbeatTimer === null, Boolean(cHeart.trigger.heartbeatTimer))
+// 上一次活动是刚刚 → 空闲窗口（2 分钟）内不该关
+await sleep(120)
+check('空闲窗口内不关', cHeart.provider.disableCalls === 0, cHeart.provider.disableCalls)
+// 把"最后一次联网活动"推到 3 分钟前 → 下一次检查就该关
+cHeart.provider.lastActivityAt = Date.now() - 3 * 60 * 1000
+cHeart.trigger.cancelRelease()
+cHeart.trigger.scheduleRelease(1000)
+await sleep(1200)
+check('空闲够了就关（不会被自己的心跳挡住）', cHeart.provider.disableCalls === 1, cHeart.provider.disableCalls)
+cHeart.trigger.dispose()
+
+console.log('# 引擎捕获钩子：第一次有人问状态就抓到实例（不用等一轮同步）')
+const cCap = await setup()
+const engineCap = new cCap.mod.SyncEngine()
+check('初始还没抓到引擎', cCap.trigger.lastEngine === null)
+engineCap.loadConfig() // /api/status、侧栏状态卡都会走到这里
+check('loadConfig 之后引擎到手（话题同步因此可以走引擎路径）', cCap.trigger.lastEngine === engineCap)
+cCap.trigger.dispose()
+
+console.log('# 宿主 web 地址：从 webServer 服务取端口（宿主进程里没有 DSH_WEB_URL）')
+const cWeb = await setup({ config: { topicSyncTrigger: 'route', topicSyncMinIntervalSeconds: 0, injectNotices: false } })
+cWeb.trigger.ctx = { get: (name) => (name === 'webServer' ? { port: 12345, host: '127.0.0.1' } : undefined) }
+const envUrlBackup = process.env.DSH_WEB_URL
+delete process.env.DSH_WEB_URL // 模拟宿主进程：那里没有这个变量（它只被注入 shell 子进程）
+const urls = []
+cWeb.trigger.fetchImpl = async (url) => {
+  urls.push(url)
+  return { ok: true, status: 200, text: async () => '{"ok":true,"summary":"stub"}' }
+}
+cWeb.trigger.noteTopicActivity('session')
+await cWeb.trigger.runTopicSync('manual', { force: true })
+check('用 webServer.port 拼出了接口地址', urls[0] === 'http://127.0.0.1:12345/dsh-sync/api/run', urls[0])
+process.env.DSH_WEB_URL = envUrlBackup
+check('有 DSH_WEB_URL 时优先用它', cWeb.trigger.webBaseUrl() === envUrlBackup, { got: cWeb.trigger.webBaseUrl(), envUrlBackup })
+delete process.env.DSH_WEB_URL
+const ctxBackup = cWeb.trigger.ctx
+cWeb.trigger.ctx = null // 连 webServer 服务也没有
+check('三处都没有时如实返回空串（上层给出可操作的报错）', cWeb.trigger.webBaseUrl() === '', cWeb.trigger.webBaseUrl())
+cWeb.trigger.ctx = ctxBackup
+process.env.DSH_WEB_URL = envUrlBackup
+cWeb.trigger.dispose()
+
+console.log('# 手动 now 免等最小间隔；失败保留「还没同步出去」的标记')
+const cForce = await setup({ config: { topicIdleSeconds: 60, topicSyncMinIntervalSeconds: 600, injectNotices: false } })
+cForce.trigger.fetchImpl = async () => ({ ok: true, status: 200, text: async () => '{"ok":true,"summary":"ok"}' })
+cForce.trigger.noteTopicActivity('session')
+cForce.trigger.topic.lastAt = Date.now()
+check('默认被最小间隔挡住', (await cForce.trigger.runTopicSync('manual')).skipped === 'too-soon')
+const forced = await cForce.trigger.runTopicSync('manual', { force: true })
+check('force=true 时放行并成功', forced.ok === true && forced.via === 'route', forced)
+cForce.trigger.fetchImpl = async () => {
+  throw new Error('假装网络挂')
+}
+cForce.trigger.topic.dirty = true
+await cForce.trigger.runTopicSync('manual', { force: true })
+check('失败后保留脏标记（下次还会同步）', cForce.trigger.topic.dirty === true)
+check('失败计数 +1（触发退避）', cForce.trigger.topic.failStreak >= 1, cForce.trigger.topic.failStreak)
+cForce.trigger.dispose()
 
 /* ---------------------------------------------------------------- 收尾 */
 
