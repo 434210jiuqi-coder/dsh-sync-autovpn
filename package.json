@@ -33,7 +33,8 @@
     "test:preflight": "node test/plugin-load.mjs && node test/wiring.test.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.2"
   },
   "os": [
     "win32"
