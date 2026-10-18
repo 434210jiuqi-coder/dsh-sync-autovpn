@@ -1,6 +1,6 @@
 {
   "name": "dsh-sync-autovpn",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH 插件：GitHub 同步（@dpskk2/dsh-chatsync）或命令行 git push/pull 一开始就自动开启本机 Clash 代理，同步结束、空闲后自动关闭并逐项还原；代理实例借用 dsh-clash-autovpn（单一实例原则）。",
   "keywords": [
     "dsh",

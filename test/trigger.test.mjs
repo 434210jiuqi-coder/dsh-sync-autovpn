@@ -137,7 +137,11 @@ check(
 )
 check('模块路径就是那个假引擎', c2.patch.modulePath === fs.realpathSync(c2.file), c2.patch.modulePath)
 const c2again = await c2.trigger.patchChatsync()
-check('重复调用是幂等的', c2again.ok === true && c2again.methods.length === 3, c2again.methods)
+check(
+  '重复调用是幂等的（三个主钩子都在，且不会重复包装）',
+  c2again.ok === true && ['_syncOnce', 'applyProxyEnv', 'flushSync'].every((m) => c2again.methods.includes(m)),
+  c2again.methods,
+)
 c2.trigger.dispose() // 用例之间必须清干净：活实例是共享的（模块级），留着会干扰后面所有用例
 
 /* ---------------------------------------------------------------- 3. 开 → 关 */

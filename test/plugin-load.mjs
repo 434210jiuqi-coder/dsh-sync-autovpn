@@ -73,7 +73,7 @@ await mod.apply(mockCtx, {
 })
 
 const toolNames = registered.map((t) => t?.name).sort()
-const expected = ['syncvpn_off', 'syncvpn_on', 'syncvpn_selftest', 'syncvpn_status', 'syncvpn_topic']
+const expected = ['syncvpn_audit', 'syncvpn_off', 'syncvpn_on', 'syncvpn_selftest', 'syncvpn_status', 'syncvpn_topic']
 const okTools = JSON.stringify(toolNames) === JSON.stringify(expected)
 const okHooks =
   hooks.some((h) => h.event === 'tools/pre-execute') &&

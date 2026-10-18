@@ -52,6 +52,48 @@ syncvpn_topic action=now       # 立刻同步一轮（守卫照旧生效）
 
 ---
 
+## 工作区去重与瘦身（为什么以前每轮都在传几百 MB）
+
+这台的实测（2026-10-19）：
+
+```
+镜像里跟踪着        895 MB / 2177 个文件
+  import/           321 MB   46 files   ← 导入暂存
+  _recon/           206 MB  157 files   ← 调研中间产物
+  enlisted-work/    173 MB  188 files
+  studio-import/     74 MB   16 files   ← Studio 导入暂存
+本地未推送的提交    8 个（两个工作区登记各 8 个，内容一模一样）
+```
+
+三个浪费点，对应四个补丁：
+
+| 浪费 | 补丁（默认开） |
+| --- | --- |
+| **同一个工作区被登记两遍**（一条路径还拼错了）→ 两个影子仓库、两轮 fetch/status/push，同样内容存两份 | `dedupeWorkspaces`：按**真实路径**去重，一轮只同步第一份；被跳过的 id 记进 `syncvpn_status.workspaceSync.lastDedupe` |
+| 把**本机可再生的垃圾**当内容上传：`.kb/kb.sqlite`（4 MB 活数据库）、`__pycache__/*.pyc`、两个安装包（66 MB + 15 MB） | `extraWorkspaceIgnore`：默认 25 条规则写进影子仓库的 `info/exclude`。chatsync 自带的 `workspaceExtraIgnore` 会给每条补 `/`（`*.pyc` 变成目录名而失效），所以本插件绕过它、按原文写 |
+| 已经跟踪的垃圾不会因为"排除"自动消失 | `syncvpn_audit action=prune`：`git rm --cached` 把它们摘出索引（**本机文件不动**），下一次同步只推「删除记录」 |
+| 推送被 **3 分钟超时**掐断 → 只重试一次就失败 → 留下「8 个提交推不上去、每轮重传」的积压 | `syncOpTimeoutSeconds`（默认 600s）：只放宽 push/fetch，不动其它 git 操作 |
+| 积压的提交里每个都带一整棵树 | `syncvpn_audit action=slim`：`reset --soft` 到远端 + 重新提交一次干净快照（**只丢弃从未推送过的本地提交**，工作区文件不动） |
+
+先体检、再决定动什么：
+
+```
+syncvpn_audit                       # 只读：重复登记、按目录占用、最常改动路径、未推送提交数、会被排除的文件
+syncvpn_audit action=prune confirm=true   # 让命中排除规则的文件退出跟踪（本机文件保留）
+syncvpn_audit action=slim  confirm=true   # 再压掉未推送的本地提交（通常能少传一个数量级）
+```
+
+> ⚠ `prune` / `slim` 会改**工作区影子仓库**（不是你的工作区文件）：`prune` 只动索引，
+> `slim` 只压「远端从来没有过」的本地提交。远端已推送的历史不受影响，本机文件一个都不删。
+> `slim` 之前请先 `prune`（或直接 `slim`，它会先按规则摘掉垃圾再压）。
+
+**大头还是要你自己决定**：`import/`、`_recon/`、`enlisted-work/`、`studio-import/` 这类目录
+合计 774 MB，是"要不要在另一台电脑上也看到它们"的问题，不是垃圾。把它们加进
+`extraWorkspaceIgnore`（或用 `workspaceExtraIgnore`）能立刻把首轮上传从 ~859 MB 降到几十 MB；
+代价是第二台电脑拿不到这些内容。
+
+---
+
 ## 与 dsh-clash-autovpn 的关系（重要）
 
 **单一实例原则**：本插件**绝不**自己 `new VpnManager()`。两份实例各记一份「原始状态」，关闭时会互相覆盖，典型后果是系统代理被留在开着没人管。
@@ -129,6 +171,9 @@ New-Item -ItemType Junction `
 | `heartbeatSeconds` | `30` | 挂着同步期间多久碰一次「活动时间」，防止 dsh-clash-autovpn 的空闲关代理把同步掐了 |
 | `shellHoldTtlMs` | `1800000` | 命令行租约的兜底上限：pre-execute 开了租约、post-execute 没回来（工具被取消/宿主异常）时，超时自动释放——否则心跳会一直给代理续命，空闲关代理永远等不到 |
 | `syncHoldTtlMs` | `7200000` | 同步租约的兜底上限（正常路径用不到：`_syncOnce` 的 finally 一定归还），防同步引擎自身异常时代理被永久占住 |
+| `dedupeWorkspaces` | `true` | 按真实路径去重工作区登记，一轮只同步第一份 |
+| `extraWorkspaceIgnore` | 25 条（见下） | 额外排除项（gitignore 语法，原样写进影子仓库 `info/exclude`）；`[]` = 关闭 |
+| `syncOpTimeoutSeconds` | `600` | push/fetch 的超时（秒）；`0` = 沿用 chatsync 的 180s。大包在代理下 3 分钟传不完就是它导致的反复重传 |
 | `injectNotices` | `true` | 失败/异常时把提示注入下一轮上下文（正常情况不注入，避免噪声） |
 | `autoSyncOnTopicEnd` | `true` | 话题结束自动同步总开关 |
 | `topicIdleSeconds` | `180` | 多久没有新活动算「话题结束」（秒） |
@@ -165,6 +210,7 @@ New-Item -ItemType Junction `
 | `syncvpn_on(target?, reason?, region?)` | **手动**先开代理（你要自己 `git push`、或用户说「先开着」）。返回 `holdId` |
 | `syncvpn_off(reason?)` | 关代理并逐项还原（释放本插件持有的所有租约；等价于 `vpn_disable`） |
 | `syncvpn_topic(action?, includeLog?)` | 话题结束自动同步：`status` 看排期/上次结果/失败退避；`now` 立刻同步一轮 |
+| `syncvpn_audit(action?, confirm?, topN?)` | 工作区同步体检与瘦身：`status`（只读：重复登记/目录占用/最常改动/未推送提交/会被排除的文件）／`prune`（让排除项退出跟踪）／`slim`（压掉未推送的本地提交） |
 
 ---
 
