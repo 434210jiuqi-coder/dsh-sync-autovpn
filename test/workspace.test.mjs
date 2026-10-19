@@ -56,6 +56,8 @@ check('目录规则命中子文件', matchPattern('.kb/kb.sqlite', '.kb/') === t
 check('扩展名规则命中任意层级', matchPattern('a/b/c.pyc', '*.pyc') === true)
 check('扩展名不误伤同名目录', matchPattern('a/b/c.pyc.txt', '*.pyc') === false)
 check('普通文件名精确匹配', matchPattern('Thumbs.db', 'Thumbs.db') === true)
+check('带通配的目录名命中其下所有文件', matchPattern('_dshmarket-upgrade-20261018/plugins.json', '_dshmarket-upgrade-*/') === true)
+check('带通配的目录名不误伤同前缀文件', matchPattern('keep/_notes.md', '_dshmarket-upgrade-*/') === false)
 check('不命中就返回 false', matchPattern('src/index.js', ['*.pyc', '.kb/']) === false)
 check('fmtBytes', fmtBytes(4 * 1024 * 1024) === '4.0 MB', fmtBytes(4 * 1024 * 1024))
 
