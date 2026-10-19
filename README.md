@@ -92,6 +92,18 @@ syncvpn_audit action=slim  confirm=true   # 再压掉未推送的本地提交（
 `extraWorkspaceIgnore`（或用 `workspaceExtraIgnore`）能立刻把首轮上传从 ~859 MB 降到几十 MB；
 代价是第二台电脑拿不到这些内容。
 
+本机 2026-10-19 的处置结果（用户确认排除 `import/ _recon/ studio-import/ _zotero-recon/
+_yang2026/ _tmp/ _reftext/ _fjmu/ _dshmarket-upgrade-*/ opencode-audit/`）：
+
+```
+跟踪文件   2177 → 657        首轮待传   1012 MB → 240.7 MB
+未推送提交  8（×2 个登记） → 1（×2）
+```
+
+剩下的 240 MB 里 `enlisted-work/` 占 173 MB、`zotero-translate-suite/` 占 50 MB —— 这两个是真正
+需要保留的内容。规则同时写进了 `dsh-sync.json` 的 `workspaceExtraIgnore`（chatsync 自己每轮会重写
+`info/exclude`，只写在镜像里会被下一轮冲掉）。
+
 ---
 
 ## 与 dsh-clash-autovpn 的关系（重要）
